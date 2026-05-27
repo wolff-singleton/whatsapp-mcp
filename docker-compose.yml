@@ -1,0 +1,10 @@
+services:
+  bridge:
+    build: ./whatsapp-bridge
+    environment:
+      WHATSAPP_BRIDGE_BIND: 0.0.0.0
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./whatsapp-bridge/store:/app/store
+    restart: unless-stopped
