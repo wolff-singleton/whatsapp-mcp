@@ -11,6 +11,20 @@ This file is the single source of truth for "how to contribute here". `CLAUDE.md
 - **Default branch:** `main`. All PRs target `main`.
 - **Releases:** automated via [release-please](https://github.com/googleapis/release-please) — do **not** hand-edit `CHANGELOG.md` or version numbers.
 
+## Local customisations
+
+This is a **clone** of [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp) (itself a fork of `lharries/whatsapp-mcp`). Local changes are **never pushed upstream**. The owner's repo is the only remote (`origin`).
+
+- **`personal` branch** — holds all local tweaks (Docker setup, minor adjustments, etc.). This is the working branch for day-to-day use.
+- **`main` branch** — kept clean and tracking `origin/main`. Pull upstream updates here, then rebase `personal` on top:
+
+  ```bash
+  git checkout main && git pull origin main
+  git checkout personal && git rebase main
+  ```
+
+- **Git operations are performed by Codex**, not Claude Code. Claude Code edits working-tree files only; Codex handles staging, committing, and rebasing.
+
 ## Architecture (read first)
 
 Two components, one repo:
