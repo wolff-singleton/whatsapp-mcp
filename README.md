@@ -306,6 +306,38 @@ outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
 
+The MCP server reads the same `WHATSAPP_MEDIA_ROOTS` (first entry, else the
+default outbox) to decide where to write converted audio, so it always lands in
+a directory the bridge is allowed to read.
+
+#### Media paths when the bridge runs in Docker
+
+The MCP server runs on the host (Claude Code launches it via `uv`); only the
+bridge runs in the container. They no longer share a filesystem, so the
+absolute `media_path` the server sends must resolve to the same bytes inside the
+container. The provided `docker-compose.yml` mounts the outbox at the **identical
+host path** and points `WHATSAPP_MEDIA_ROOTS` at it:
+
+```yaml
+environment:
+  WHATSAPP_MEDIA_ROOTS: ${HOME}/.local/share/whatsapp-mcp/outbox
+volumes:
+  - ${HOME}/.local/share/whatsapp-mcp/outbox:${HOME}/.local/share/whatsapp-mcp/outbox
+```
+
+With this in place:
+
+- **`send_audio_message`** works with no per-project config — the server writes
+  the converted `.ogg` into that outbox automatically.
+- **`send_file`** still requires the file to already live inside the outbox
+  (copy it there first, then send). This is deliberate: auto-staging arbitrary
+  host paths would defeat the `WHATSAPP_MEDIA_ROOTS` confinement that guards
+  against arbitrary-file-read abuse.
+
+A symptom of a missing or mismatched mount is the bridge rejecting sends with
+`resolve media_path: lstat <path>: no such file or directory` — the path exists
+on the host but not in the container.
+
 ### CLI flags (Go bridge)
 
 | Flag                  | Default | Description                                                                                                                                                                                                                                                       |

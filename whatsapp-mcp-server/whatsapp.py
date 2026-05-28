@@ -21,9 +21,48 @@ WHATSMEOW_DB_PATH = os.getenv(
 )
 WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api")
 
+
+def _resolve_media_outbox() -> str:
+    """First configured media root, mirroring the bridge's resolution.
+
+    Converted audio must land inside a directory the bridge can read. When the
+    bridge runs in Docker only the mounted media root is reachable, so the
+    system temp dir (e.g. /var/folders on macOS) is invisible to it. Default
+    matches the bridge's default outbox so the host and bridge agree with no
+    extra config; override with WHATSAPP_MEDIA_ROOTS (first entry wins).
+    """
+    raw = os.getenv("WHATSAPP_MEDIA_ROOTS", "").strip()
+    first = next((p.strip() for p in raw.split(os.pathsep) if p.strip()), "")
+    outbox = first or os.path.expanduser("~/.local/share/whatsapp-mcp/outbox")
+    os.makedirs(outbox, exist_ok=True)
+    return outbox
+
+
+MEDIA_OUTBOX = _resolve_media_outbox()
+
 _BRIDGE_TOKEN_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", ".bridge-token"
 )
+
+_HOST_STORE_DIR = os.path.dirname(MESSAGES_DB_PATH)
+
+
+def _rebase_store_path(path: str | None) -> str | None:
+    """Map the bridge's store path onto the host store dir when needed.
+
+    The bridge returns a path rooted at its own cwd — e.g. /app/store/... in
+    Docker, where the store is bind-mounted to the host checkout. Only rewrite
+    when the original path isn't openable here and the rebased one is, so the
+    host (non-Docker) case and split deployments are left untouched.
+    """
+    if not path or os.path.isfile(path):
+        return path
+    idx = path.replace("\\", "/").rfind("store/")
+    if idx == -1:
+        return path
+    rel = path.replace("\\", "/")[idx + len("store/") :].split("/")
+    candidate = os.path.normpath(os.path.join(_HOST_STORE_DIR, *rel))
+    return candidate if os.path.isfile(candidate) else path
 
 
 def _read_bridge_token() -> str | None:
@@ -1045,7 +1084,7 @@ def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
 
         if not media_path.endswith(".ogg"):
             try:
-                media_path = audio.convert_to_opus_ogg_temp(media_path)
+                media_path = audio.convert_to_opus_ogg_temp(media_path, output_dir=MEDIA_OUTBOX)
             except Exception as e:
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
 
@@ -1088,7 +1127,7 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
         if response.status_code == 200:
             result = response.json()
             if result.get("success", False):
-                path = result.get("path")
+                path = _rebase_store_path(result.get("path"))
                 print(f"Media downloaded successfully: {path}")
                 return path
             else:
