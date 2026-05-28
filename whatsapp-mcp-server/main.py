@@ -26,6 +26,9 @@ from whatsapp import (
     get_sender_name as whatsapp_get_sender_name,
 )
 from whatsapp import (
+    is_allowed as whatsapp_is_allowed,
+)
+from whatsapp import (
     list_chats as whatsapp_list_chats,
 )
 from whatsapp import (
@@ -91,6 +94,19 @@ def get_contact(
     identifier = identifier.strip()
     if not identifier:
         raise ValueError("identifier must be non-empty")
+
+    if not whatsapp_is_allowed(identifier):
+        return {
+            "identifier": identifier,
+            "jid": None,
+            "phone_number": None,
+            "lid": None,
+            "name": None,
+            "display_name": None,
+            "is_lid": False,
+            "resolved": False,
+            "error": "Contact is not in the allowed contacts for this session (WHATSAPP_ALLOWED_NUMBERS)",
+        }
 
     # Detect identifier type and normalize to JID.
     bare_numeric_digits: str | None = None

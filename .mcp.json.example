@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "whatsapp": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/mac-wolff/Documents/GitHub/whatsapp-mcp/whatsapp-mcp-server",
+        "run",
+        "main.py"
+      ],
+      "env": {
+        "WHATSAPP_ALLOWED_NUMBERS": "61412345678,61498765432"
+      }
+    }
+  }
+}

@@ -116,6 +116,49 @@ Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
 }
 ```
 
+### Restricting an instance per project (Claude Code)
+
+When several projects share **one** WhatsApp account, you can give each its own
+MCP server instance scoped to a different set of contacts via
+[`WHATSAPP_ALLOWED_NUMBERS`](#restricting-an-instance-to-specific-contacts).
+Claude Code launches the server per project from a `.mcp.json` in the project
+root, so the allowlist is just a per-project setting — no extra processes or
+containers to manage.
+
+A copy-ready template lives at [`.mcp.json.example`](./.mcp.json.example). For
+each project:
+
+1. Copy it into the project root as `.mcp.json`:
+
+   ```bash
+   cp /path/to/whatsapp-mcp/.mcp.json.example /path/to/your-project/.mcp.json
+   ```
+
+2. Edit `WHATSAPP_ALLOWED_NUMBERS` to that project's contacts (and fix the
+   `--directory` path if your checkout differs):
+
+   ```json
+   {
+     "mcpServers": {
+       "whatsapp": {
+         "command": "uv",
+         "args": ["--directory", "/path/to/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"],
+         "env": {
+           "WHATSAPP_ALLOWED_NUMBERS": "61412345678,61498765432"
+         }
+       }
+     }
+   }
+   ```
+
+3. Open the project in Claude Code and approve the server when prompted.
+
+All projects talk to the same bridge and account; only the allowlist differs.
+The bridge token and database paths resolve automatically relative to the
+checkout, so they don't need to be set per project (set `WHATSAPP_BRIDGE_TOKEN`
+only if the bridge runs split out from this checkout). Omit
+`WHATSAPP_ALLOWED_NUMBERS` for an unrestricted instance.
+
 ## Tools
 
 Messages include `sender_display` showing "Name (phone)" format for easy identification by agents.
@@ -287,6 +330,30 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TOKEN` | generated in `whatsapp-bridge/store/.bridge-token` | Bearer token required for bridge REST calls |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
+| `WHATSAPP_ALLOWED_NUMBERS` | unset (full access)                  | Comma-separated phone numbers this instance may read/send (see below) |
+
+### Restricting an instance to specific contacts
+
+Set `WHATSAPP_ALLOWED_NUMBERS` to scope a single MCP server instance to a fixed
+set of direct-message contacts. When it is set, every read tool (listing chats,
+messages, contacts, context, downloads) and every send tool is limited to those
+numbers — all other DMs and **all** group chats are hidden as if they did not
+exist. Leave it unset (the default) for full access.
+
+Numbers are given in **full international form with no `+` and no leading `0`**
+(an Australian `0412 345 678` becomes `61412345678`). Separators like `+`,
+spaces and dashes are ignored, so `+61 412 345 678` also works:
+
+```bash
+WHATSAPP_ALLOWED_NUMBERS=61412345678,61498765432
+```
+
+The restriction is enforced in the MCP server (`whatsapp.py`) and is per
+instance, so when several projects share **one** WhatsApp account you can give
+each project its own MCP server config with a different allowlist. It guards the
+LLM-facing tools against reading or messaging contacts outside the list; it is
+not a substitute for OS-level isolation against an untrusted operator (anyone
+who can read `messages.db` directly still sees everything).
 
 ### Bridge authentication and media paths
 

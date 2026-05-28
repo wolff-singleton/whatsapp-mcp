@@ -218,6 +218,81 @@ def _sender_aliases(value: str) -> list[str]:
     return aliases
 
 
+def _normalise_msisdn(value: str) -> str:
+    """Reduce a phone number or JID to bare digits.
+
+    Drops the JID suffix and any +, spaces, dashes or brackets, so that
+    "+61 412 345 678" and "61412345678@s.whatsapp.net" both collapse to
+    "61412345678". Note: a national-format number with a trunk 0 (e.g.
+    "0412345678") is NOT converted to international form — give numbers in
+    full international form without the leading 0 or +.
+    """
+    bare = value.split("@", 1)[0]
+    return "".join(ch for ch in bare if ch.isdigit())
+
+
+def _load_allowed_numbers() -> set[str] | None:
+    """Parse WHATSAPP_ALLOWED_NUMBERS into a set of bare-digit numbers.
+
+    Returns None when the variable is unset or empty, which means no
+    restriction is configured (full access — the default).
+    """
+    raw = os.getenv("WHATSAPP_ALLOWED_NUMBERS", "").strip()
+    if not raw:
+        return None
+    numbers = {_normalise_msisdn(part) for part in raw.split(",")}
+    numbers.discard("")
+    return numbers or None
+
+
+def get_allowed_jids() -> set[str] | None:
+    """Expand the configured allowlist into every identifier form a row might
+    be stored under: bare phone, phone JID, bare LID and LID JID.
+
+    The bridge writes senders/chats inconsistently across these forms, and a
+    DM contact may be keyed by either phone or LID, so we resolve each allowed
+    number through whatsmeow_lid_map (via _sender_aliases) and accept all of
+    them. Returns None when no allowlist is configured (full access).
+    """
+    numbers = _load_allowed_numbers()
+    if numbers is None:
+        return None
+    allowed: set[str] = set()
+    for number in numbers:
+        for alias in _sender_aliases(number):
+            allowed.add(alias)
+            allowed.add(alias.split("@", 1)[0])
+    return allowed
+
+
+def is_allowed(jid: str | None, allowed: set[str] | None = None) -> bool:
+    """Whether a chat/contact identifier may be read or messaged.
+
+    Returns True for everything when no allowlist is configured. When the
+    allowlist is set, only DM contacts on it match — group JIDs (@g.us) never
+    match because the list holds phone numbers, so groups are excluded by
+    construction. Pass a precomputed `allowed` set to avoid re-querying the
+    LID map per row when filtering a list.
+    """
+    if allowed is None:
+        allowed = get_allowed_jids()
+    if allowed is None:
+        return True
+    if not jid:
+        return False
+    return bool({jid, jid.split("@", 1)[0]} & allowed)
+
+
+def _allowed_chat_jids() -> set[str] | None:
+    """The full-JID forms (those with an @suffix) of the allowlist, for use in
+    SQL `chat_jid IN (...)` filters. None when no allowlist is configured.
+    """
+    allowed = get_allowed_jids()
+    if allowed is None:
+        return None
+    return {a for a in allowed if "@" in a}
+
+
 def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
     """Resolve a WhatsApp LID (linked device identifier) to a phone number.
 
@@ -463,6 +538,15 @@ def list_messages(
             where_clauses.append("(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)")
             params.extend([query, query])
 
+        # Restrict to allowed DM contacts (no-op when no allowlist is set).
+        # Filtering in SQL keeps limit/pagination consistent — a post-filter
+        # would let disallowed rows consume the page budget.
+        allowed_jids = _allowed_chat_jids()
+        if allowed_jids is not None:
+            placeholders = ",".join("?" * len(allowed_jids))
+            where_clauses.append(f"messages.chat_jid IN ({placeholders})")
+            params.extend(sorted(allowed_jids))
+
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
@@ -540,6 +624,11 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
         msg_data = cursor.fetchone()
 
         if not msg_data:
+            raise ValueError(f"Message with ID {message_id} not found")
+
+        # Treat a message in a disallowed chat as if it does not exist, so the
+        # allowlist can't be used to probe which message IDs are real.
+        if not is_allowed(msg_data[7]):
             raise ValueError(f"Message with ID {message_id} not found")
 
         target_message = Message(
@@ -676,6 +765,14 @@ def list_chats(
             )
             params.extend([query, query, f"%{query}%"])
 
+        # Restrict to allowed DM contacts (no-op when no allowlist is set).
+        # Group chats never match the allowlist, so they drop out here.
+        allowed_jids = _allowed_chat_jids()
+        if allowed_jids is not None:
+            placeholders = ",".join("?" * len(allowed_jids))
+            where_clauses.append(f"chats.jid IN ({placeholders})")
+            params.extend(sorted(allowed_jids))
+
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
@@ -721,6 +818,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     """
     seen_jids: set[str] = set()
     result: list[dict[str, Any]] = []
+    allowed = get_allowed_jids()
     # JIDs are all ASCII so LIKE is safe; names use instr() because SQLite's
     # LOWER() only folds case for ASCII and would drop Unicode matches.
     jid_pattern = "%" + query + "%"
@@ -742,7 +840,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
             (query, query, jid_pattern),
         )
         for jid, name in cursor.fetchall():
-            if jid not in seen_jids:
+            if jid not in seen_jids and is_allowed(jid, allowed):
                 seen_jids.add(jid)
                 contact = Contact(phone_number=jid.split("@")[0], name=name, jid=jid)
                 result.append(contact_to_dict(contact))
@@ -772,7 +870,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                 (query, query, query, query, query, query, query, query, jid_pattern),
             )
             for their_jid, full_name, push_name, first_name, business_name in cursor2.fetchall():
-                if their_jid not in seen_jids:
+                if their_jid not in seen_jids and is_allowed(their_jid, allowed):
                     seen_jids.add(their_jid)
                     name = full_name or push_name or first_name or business_name or ""
                     contact = Contact(phone_number=their_jid.split("@")[0], name=name, jid=their_jid)
@@ -820,8 +918,11 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
 
         chats = cursor.fetchall()
 
+        allowed = get_allowed_jids()
         result = []
         for chat_data in chats:
+            if not is_allowed(chat_data[0], allowed):
+                continue
             chat = Chat(
                 jid=chat_data[0],
                 name=chat_data[1],
@@ -857,6 +958,17 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
 
         aliases = _sender_aliases(jid)
         placeholders = ",".join("?" * len(aliases))
+        params: list[Any] = [*aliases, jid]
+        where = f"(m.sender IN ({placeholders}) OR c.jid = ?)"
+
+        # Restrict to allowed chats so we return the most recent *allowed*
+        # interaction, not None just because the latest one was in a group.
+        allowed_jids = _allowed_chat_jids()
+        if allowed_jids is not None:
+            allowed_placeholders = ",".join("?" * len(allowed_jids))
+            where += f" AND m.chat_jid IN ({allowed_placeholders})"
+            params.extend(sorted(allowed_jids))
+
         cursor.execute(
             f"""
             SELECT
@@ -870,11 +982,11 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
                 m.media_type
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender IN ({placeholders}) OR c.jid = ?
+            WHERE {where}
             ORDER BY m.timestamp DESC
             LIMIT 1
         """,
-            (*aliases, jid),
+            tuple(params),
         )
 
         msg_data = cursor.fetchone()
@@ -909,6 +1021,8 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
     Returns:
         Chat dictionary or None if not found
     """
+    if not is_allowed(chat_jid):
+        return None
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
@@ -991,6 +1105,9 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
         if not chat_data:
             return None
 
+        if not is_allowed(chat_data[0]):
+            return None
+
         chat = Chat(
             jid=chat_data[0],
             name=chat_data[1],
@@ -1014,6 +1131,9 @@ def send_message(recipient: str, message: str) -> tuple[bool, str]:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
+
+        if not is_allowed(recipient):
+            return False, "Recipient is not in the allowed contacts for this session (WHATSAPP_ALLOWED_NUMBERS)"
 
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
@@ -1043,6 +1163,9 @@ def send_file(recipient: str, media_path: str) -> tuple[bool, str]:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
+
+        if not is_allowed(recipient):
+            return False, "Recipient is not in the allowed contacts for this session (WHATSAPP_ALLOWED_NUMBERS)"
 
         if not media_path:
             return False, "Media path must be provided"
@@ -1075,6 +1198,9 @@ def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
+
+        if not is_allowed(recipient):
+            return False, "Recipient is not in the allowed contacts for this session (WHATSAPP_ALLOWED_NUMBERS)"
 
         if not media_path:
             return False, "Media path must be provided"
@@ -1118,6 +1244,8 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
     Returns:
         The local file path if download was successful, None otherwise
     """
+    if not is_allowed(chat_jid):
+        return None
     try:
         url = f"{WHATSAPP_API_BASE_URL}/download"
         payload = {"message_id": message_id, "chat_jid": chat_jid}
