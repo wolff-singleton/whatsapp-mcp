@@ -23,11 +23,24 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
 ### Prerequisites
 
-- Go 1.24+
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/) package manager
+The recommended setup runs the bridge in Docker and the MCP server on the host
+via `uv`:
+
+- [Docker](https://docs.docker.com/get-started/get-docker/) (with Compose) — runs the bridge
+- [uv](https://docs.astral.sh/uv/) package manager — runs the MCP server (Claude Code launches it)
 - Claude Desktop or Cursor
 - FFmpeg (optional, for voice message conversion)
+
+<details>
+<summary>Running the bridge without Docker</summary>
+
+If you'd rather build and run the Go bridge directly instead of in a container,
+you'll also need:
+
+- Go 1.24+
+- Python 3.11+ (a host Python the MCP server can use)
+
+</details>
 
 ### Quick Start
 
@@ -38,7 +51,21 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
    cd whatsapp-mcp
    ```
 
-2. **Start the WhatsApp bridge**
+2. **Start the WhatsApp bridge** (Docker)
+
+   ```bash
+   docker compose up        # watch the logs for the QR code
+   ```
+
+   Scan the QR code with WhatsApp on your phone to authenticate. On first start,
+   the bridge generates a local REST API token and writes it, along with the
+   SQLite databases, into the mounted `whatsapp-bridge/store/`. Once paired,
+   `Ctrl+C` and restart detached with `docker compose up -d`.
+
+   <details>
+   <summary>Without Docker</summary>
+
+   Build and run the Go bridge directly instead:
 
    ```bash
    cd whatsapp-bridge
@@ -46,8 +73,9 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
    ```
 
    On first start, the bridge prints and stores a local REST API token at
-   `whatsapp-bridge/store/.bridge-token`. Scan the QR code with WhatsApp on
-   your phone to authenticate.
+   `whatsapp-bridge/store/.bridge-token`. Scan the QR code to authenticate.
+
+   </details>
 
 3. **Configure Claude Desktop**
 
@@ -83,8 +111,8 @@ git pull
 
 | You changed                                                              | What to do                                                                                                                                            |
 | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Bridge code** (`whatsapp-bridge/*.go`) and you run `go run .`          | Nothing — `go run` recompiles each launch. Just restart the bridge.                                                                                   |
-| **Bridge code** and you run a built binary                               | `cd whatsapp-bridge && go build -o whatsapp-bridge && ./whatsapp-bridge`                                                                              |
+| **Bridge code** (`whatsapp-bridge/*.go`) and you run it in Docker        | `docker compose up -d --build` — rebuilds the image and restarts the container.                                                                       |
+| **Bridge code** and you run it without Docker (`go run .`)               | Nothing — `go run` recompiles each launch. Just restart the bridge. (For a built binary: `cd whatsapp-bridge && go build -o whatsapp-bridge && ./whatsapp-bridge`.) |
 | **MCP server** (`whatsapp-mcp-server/*.py`, `pyproject.toml`, `uv.lock`) | Restart Claude Desktop / Cursor — `uv` re-resolves from the lockfile on next launch. Force a sync with `cd whatsapp-mcp-server && uv sync` if needed. |
 
 Updates do **not** require re-pairing or deleting `whatsapp.db` — your session and message history are preserved. Re-pairing is only needed when explicitly requesting full history (see [Requesting full history](#requesting-full-history)).
@@ -158,6 +186,57 @@ The bridge token and database paths resolve automatically relative to the
 checkout, so they don't need to be set per project (set `WHATSAPP_BRIDGE_TOKEN`
 only if the bridge runs split out from this checkout). Omit
 `WHATSAPP_ALLOWED_NUMBERS` for an unrestricted instance.
+
+### Running it on another machine
+
+The whole stack is self-contained: clone the repo onto a second machine and it
+runs there locally, with Claude Code on that machine talking to its own bridge
+and MCP server. Nothing is shared with the first machine over the network — each
+machine is an independent WhatsApp **linked device** on the same account
+(WhatsApp allows several).
+
+The bridge runs in Docker; the Python MCP server runs on the host via `uv`
+(Claude Code launches it). So the second machine needs **Docker** and **`uv`**
+([install](https://docs.astral.sh/uv/getting-started/installation/)) — no Go or
+Python toolchain.
+
+1. **Clone the repo** (do **not** copy `whatsapp-bridge/store/` across — it holds
+   the linked-device session and is gitignored for good reason; see the caveat
+   below):
+
+   ```bash
+   git clone https://github.com/verygoodplugins/whatsapp-mcp.git
+   cd whatsapp-mcp
+   ```
+
+2. **Start the bridge and pair this machine as a new device:**
+
+   ```bash
+   docker compose up        # watch the logs for the QR code
+   ```
+
+   Scan the QR with WhatsApp → Settings → Linked Devices → Link a Device. Once
+   paired, `Ctrl+C` and restart detached with `docker compose up -d`. The bridge
+   writes its REST token and the SQLite databases into the mounted
+   `whatsapp-bridge/store/` on this machine.
+
+3. **Point Claude Code at the local MCP server.** Use the same `uv` config as
+   above (copy [`.mcp.json.example`](./.mcp.json.example) into the project, fix
+   the `--directory` path to this machine's checkout). The MCP server reads the
+   SQLite files the bridge container writes into `store/` and reaches the bridge
+   at `localhost:8080` — both local, so no extra configuration is needed.
+
+For outbound media (`send_file` / `send_audio_message`), the same host-path
+mount applies as on any Docker bridge setup — see
+[Media paths when the bridge runs in Docker](#media-paths-when-the-bridge-runs-in-docker).
+
+> **Don't run two machines off one session.** Pair the second machine with its
+> own QR scan (step 2) rather than copying `whatsapp-bridge/store/whatsapp.db`
+> across — WhatsApp treats one session used from two places as a single device
+> and will disconnect one of them. Each machine getting its own linked device
+> lets both run side by side. The new device starts with whatever backlog the
+> phone syncs to it; to pull more history at pair time, use
+> [`--full-history-pair`](#requesting-full-history).
 
 ## Tools
 
