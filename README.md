@@ -277,15 +277,21 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 
 #### `list_messages`
 
-Get messages with filters, date ranges, and sorting.
+Get messages with filters, full-text search, pagination, and optional surrounding context.
 
 **Parameters:**
 
+- `after` (optional): ISO-8601 date/time — only messages after this (e.g. `2026-01-01` or `2026-01-01T09:00:00`)
+- `before` (optional): ISO-8601 date/time — only messages before this
+- `sender_phone_number` (optional): Filter by sender phone number
 - `chat_jid` (optional): Filter by specific chat JID
+- `query` (optional): Search term to filter messages by content
 - `limit` (optional): Number of messages (default 50, max 500)
-- `before_date` (optional): Messages before this date (YYYY-MM-DD)
-- `after_date` (optional): Messages after this date (YYYY-MM-DD)
-- `sort_by` (optional): "newest" or "oldest" (default "newest")
+- `page` (optional): Page number for pagination (default 0)
+- `include_context` (optional): Include surrounding messages for each match (default true)
+- `context_before` (optional): Messages to include before each match (default 1)
+- `context_after` (optional): Messages to include after each match (default 1)
+- `sort_by` (optional): "newest" (default) or "oldest"
 
 **Natural Language Examples:**
 
@@ -314,8 +320,7 @@ Send a media file (image, video, document).
 **Parameters:**
 
 - `recipient` (required): Phone number or group JID
-- `file_path` (required): Path to the file
-- `caption` (optional): Caption for the media
+- `media_path` (required): Absolute path to the file
 
 The bridge only reads files inside configured media roots. By default this is
 `~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow
@@ -328,7 +333,7 @@ Send a voice message (automatically converts to Opus .ogg format).
 **Parameters:**
 
 - `recipient` (required): Phone number or group JID
-- `file_path` (required): Path to audio file
+- `media_path` (required): Absolute path to the audio file
 
 Converted audio is sent through the same media-path confinement as
 `send_file`.
@@ -346,11 +351,15 @@ Download media from a received message.
 
 #### `list_chats`
 
-List all chats with metadata.
+List chats with metadata, with optional search, pagination, and sorting.
 
 **Parameters:**
 
+- `query` (optional): Search term to filter chats by name or JID
 - `limit` (optional): Number of chats (default 50, max 200)
+- `page` (optional): Page number for pagination (default 0)
+- `include_last_message` (optional): Include the last message in each chat (default true)
+- `sort_by` (optional): "last_active" (default) or "name"
 
 #### `get_chat`
 
@@ -358,7 +367,8 @@ Get specific chat metadata by JID.
 
 **Parameters:**
 
-- `jid` (required): Chat JID
+- `chat_jid` (required): Chat JID
+- `include_last_message` (optional): Include the last message (default true)
 
 #### `get_direct_chat_by_contact`
 
@@ -366,7 +376,7 @@ Find a direct message chat with a contact.
 
 **Parameters:**
 
-- `phone` (required): Phone number of the contact
+- `sender_phone_number` (required): Phone number of the contact
 
 #### `get_contact_chats`
 
@@ -374,7 +384,9 @@ List all chats involving a specific contact.
 
 **Parameters:**
 
-- `phone` (required): Phone number of the contact
+- `jid` (required): The contact's JID
+- `limit` (optional): Number of chats (default 20)
+- `page` (optional): Page number for pagination (default 0)
 
 #### `get_last_interaction`
 
@@ -382,7 +394,7 @@ Get the last message exchanged with a contact.
 
 **Parameters:**
 
-- `phone` (required): Phone number of the contact
+- `jid` (required): The contact's JID
 
 #### `get_message_context`
 
@@ -391,7 +403,6 @@ Get messages around a specific message for context.
 **Parameters:**
 
 - `message_id` (required): ID of the target message
-- `chat_jid` (required): JID of the chat
 - `before` (optional): Number of messages before (default 5)
 - `after` (optional): Number of messages after (default 5)
 
@@ -605,7 +616,7 @@ flowchart LR
         HEALTH["/api/health"]
     end
 
-    subgraph MCPTools["MCP Tools (14 total)"]
+    subgraph MCPTools["MCP Tools (13 total)"]
         direction TB
         CONT["Contact Tools<br/>search_contacts, get_contact"]
         MSG["Message Tools<br/>list_messages, send_message, etc."]
