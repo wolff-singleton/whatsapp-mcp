@@ -6,21 +6,28 @@ This file is the single source of truth for "how to contribute here". `CLAUDE.md
 
 ## Repository
 
-- **Repo:** [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp)
-- **Origin remote:** always `origin` (this fork). PRs, issues, and `gh` commands target this fork, not the upstream `lharries/whatsapp-mcp`.
+- **Repo:** personal fork [`wolff-singleton/whatsapp-mcp`](https://github.com/wolff-singleton/whatsapp-mcp), based on [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp).
+- **`origin` remote:** personal fork. Push local branches here.
+- **`upstream` remote:** source fork. Pull shared updates from here.
 - **Default branch:** `main`. All PRs target `main`.
 - **Releases:** automated via [release-please](https://github.com/googleapis/release-please) — do **not** hand-edit `CHANGELOG.md` or version numbers.
 
 ## Local customisations
 
-This is a **clone** of [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp) (itself a fork of `lharries/whatsapp-mcp`). Local changes are **never pushed upstream**. The owner's repo is the only remote (`origin`).
+This is a **personal fork** of [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp) (itself a fork of `lharries/whatsapp-mcp`). Local changes are pushed to `origin`, not `upstream`.
 
-- **`personal` branch** — holds all local tweaks (Docker setup, minor adjustments, etc.). This is the working branch for day-to-day use.
-- **`main` branch** — kept clean and tracking `origin/main`. Pull upstream updates here, then rebase `personal` on top:
+- **`personal` branch** — holds all local tweaks (Docker setup, minor adjustments, etc.). This is the working branch for day-to-day use. Push this branch to `origin/personal`.
+- **`main` branch** — kept aligned with `upstream/main` unless intentionally maintaining fork-specific commits. Pull upstream updates here, push them to `origin/main`, then rebase `personal` on top:
 
   ```bash
-  git checkout main && git pull origin main
-  git checkout personal && git rebase main
+  git checkout main
+  git fetch upstream
+  git merge --ff-only upstream/main
+  git push origin main
+
+  git checkout personal
+  git rebase main
+  git push origin personal
   ```
 
 - **Git operations are performed by Codex**, not Claude Code. Claude Code edits working-tree files only; Codex handles staging, committing, and rebasing.
