@@ -4,6 +4,8 @@ This file is here for Claude Code (claude.ai/code), which looks for `CLAUDE.md` 
 
 The actual contributor + agent guide for this repository lives in **[`AGENTS.md`](./AGENTS.md)**. Read it first.
 
+@AGENTS.md
+
 Companion docs:
 
 - [`ROADMAP.md`](./ROADMAP.md) — what this fork is (and is not) trying to be.
