@@ -137,6 +137,7 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 4. **History sync** is controlled by the *primary* device (the phone). The bridge can request more (see the `--full-history-pair` flag), but the phone has the final word.
 5. **`messages.db` is the source of truth for the MCP server.** Don't make the MCP server dependent on the bridge being up for *read* operations.
 6. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
+7. **Process name ≠ binary name.** `whatsapp-bridge/go.mod` declares `module whatsapp-client`, so `go run .` runs as **`whatsapp-client`** (not `whatsapp-bridge`). To find/kill the dev bridge use `pgrep -af whatsapp-client` or match by port (`ss -ltnp | grep :8080`). The Docker build (`Dockerfile`) outputs a `whatsapp-bridge` binary; the container is `whatsapp-mcp-bridge-1`.
 
 ## Where to make changes
 
