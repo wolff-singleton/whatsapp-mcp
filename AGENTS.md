@@ -31,6 +31,7 @@ This is a **personal fork** of [`verygoodplugins/whatsapp-mcp`](https://github.c
   ```
 
 - **Git operations are performed by Codex**, not Claude Code. Claude Code edits working-tree files only; Codex handles staging, committing, and rebasing.
+- **Create commits on `personal` only.** Do not commit directly on `main` or any other branch.
 
 ## Architecture (read first)
 
