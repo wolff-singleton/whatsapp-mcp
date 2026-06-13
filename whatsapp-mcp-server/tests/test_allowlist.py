@@ -39,6 +39,8 @@ def _make_db(path):
             timestamp TIMESTAMP,
             is_from_me BOOLEAN,
             media_type TEXT,
+            filename TEXT,
+            quoted_message_id TEXT,
             PRIMARY KEY (id, chat_jid),
             FOREIGN KEY (chat_jid) REFERENCES chats(jid)
         );

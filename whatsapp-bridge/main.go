@@ -166,6 +166,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "deleted_at", "TIMESTAMP"); err != nil {
 		return fmt.Errorf("failed to ensure messages.deleted_at column: %w", err)
 	}
+	if err := ensureColumn(db, "messages", "quoted_message_id", "TEXT"); err != nil {
+		return fmt.Errorf("failed to ensure messages.quoted_message_id column: %w", err)
+	}
 	return nil
 }
 
@@ -614,16 +617,27 @@ func (store *MessageStore) GetChatEphemeralSettings(jid string) (ChatEphemeralSe
 
 // Store a message in the database
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
+	quotedMessageId string) error {
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
 		return nil
 	}
 
+	// Store empty quoted_message_id as SQL NULL so the column is null for
+	// plain messages (no ContextInfo). This makes the ON CONFLICT merge
+	// straightforward: COALESCE prefers the new non-null value over a
+	// kept null, and ignores an incoming null so it cannot clobber a
+	// previously-stored ID.
+	var qmid interface{}
+	if quotedMessageId != "" {
+		qmid = quotedMessageId
+	}
+
 	_, err := store.db.Exec(
 		`INSERT INTO messages
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
 			content = excluded.content,
@@ -635,8 +649,9 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 			media_key = excluded.media_key,
 			file_sha256 = excluded.file_sha256,
 			file_enc_sha256 = excluded.file_enc_sha256,
-			file_length = excluded.file_length`,
-		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+			file_length = excluded.file_length,
+			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id)`,
+		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid,
 	)
 	return err
 }
@@ -819,9 +834,21 @@ type SendMessageResponse struct {
 
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
-	Recipient string `json:"recipient"`
-	Message   string `json:"message"`
-	MediaPath string `json:"media_path,omitempty"`
+	Recipient       string `json:"recipient"`
+	Message         string `json:"message"`
+	MediaPath       string `json:"media_path,omitempty"`
+	QuotedMessageID string `json:"quoted_message_id,omitempty"`
+	QuotedSenderJID string `json:"quoted_sender_jid,omitempty"`
+	QuotedContent   string `json:"quoted_content,omitempty"`
+}
+
+// ReactRequest is the request body for the /api/react endpoint.
+type ReactRequest struct {
+	Recipient string  `json:"recipient"`  // chat JID
+	MessageID string  `json:"message_id"` // ID of the message being reacted to
+	FromMe    bool    `json:"from_me"`    // whether the reacted-to message was sent by us
+	SenderJID string  `json:"sender_jid"` // full JID of the reacted-to message's sender
+	Emoji     *string `json:"emoji"`      // reaction emoji; empty string removes the reaction
 }
 
 // classifyMediaPath maps a file extension to (whatsmeow upload type, MIME
@@ -1033,7 +1060,7 @@ func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID,
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -1152,6 +1179,20 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				FileLength:    &resp.FileLength,
 			}
 		}
+	} else if quotedMsgID != "" {
+		// Quoted reply: use ExtendedTextMessage so we can attach ContextInfo.
+		// Only text quoting is supported; quoting media messages is not exposed
+		// because the quoted preview on the recipient's device requires the
+		// original media's key/URL, which is not available to the API caller.
+		ctx := &waProto.ContextInfo{
+			StanzaID:      proto.String(quotedMsgID),
+			Participant:   proto.String(quotedSenderJID),
+			QuotedMessage: &waProto.Message{Conversation: proto.String(quotedContent)},
+		}
+		msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
+			Text:        proto.String(message),
+			ContextInfo: ctx,
+		}
 	} else {
 		msg.Conversation = proto.String(message)
 	}
@@ -1216,7 +1257,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		}
 		if storeErr := messageStore.StoreMessage(
 			resp.ID, chatJID, senderUser, message, timestamp, true,
-			mediaType, filename, "", nil, nil, nil, 0,
+			mediaType, filename, "", nil, nil, nil, 0, quotedMsgID,
 		); storeErr != nil {
 			fmt.Printf("Warning: failed to persist outbound message: %v\n", storeErr)
 		}
@@ -1437,6 +1478,33 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
+	// Reactions arrive as their own message stanza rather than message content.
+	// Persist them in the messages table as media_type="reaction", with the
+	// emoji in `content` and the reacted-to message ID in `filename`, then
+	// return — a reaction is not a normal content message. An empty emoji is a
+	// valid event meaning "reaction removed"; we store it (so consumers see the
+	// removal) rather than dropping it.
+	if reaction := msg.Message.GetReactionMessage(); reaction != nil {
+		reactedToID := ""
+		if key := reaction.GetKey(); key != nil {
+			reactedToID = key.GetID()
+		}
+		if reactedToID != "" {
+			emoji := reaction.GetText()
+			if err := messageStore.StoreMessage(
+				msg.Info.ID, chatJID, sender, emoji,
+				msg.Info.Timestamp, msg.Info.IsFromMe,
+				"reaction", reactedToID, "", nil, nil, nil, 0, "",
+			); err != nil {
+				logger.Warnf("Failed to store reaction: %v", err)
+			}
+			if forwardSelfMessages || !msg.Info.IsFromMe {
+				SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji)
+			}
+		}
+		return
+	}
+
 	// Extract text content
 	content := extractTextContent(msg.Message)
 
@@ -1467,6 +1535,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileSHA256,
 		fileEncSHA256,
 		fileLength,
+		quotedMessageId,
 	)
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
@@ -1761,13 +1830,10 @@ func extractDirectPathFromURL(url string) string {
 		return url // Return original URL if parsing fails
 	}
 
-	pathPart := parts[1]
-
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
-
-	// Create proper direct path format
-	return "/" + pathPart
+	// Keep the query string: it carries the CDN auth tokens (oh=/oe=).
+	// whatsmeow's Download rebuilds the URL as host + directPath + "&hash=..."
+	// and the CDN returns 403 if the auth params are missing.
+	return "/" + parts[1]
 }
 
 // Start a REST API server to expose the WhatsApp client functionality.
@@ -1853,7 +1919,7 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			req.Recipient, len(req.Message), resolvedMediaPath != "")
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, resolvedMediaPath)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent)
 		fmt.Printf("← /api/send success=%v status=%q\n", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -1868,6 +1934,56 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			Success: success,
 			Message: message,
 		})
+	}))
+
+	// Handler for sending (or removing) emoji reactions
+	mux.HandleFunc("/api/react", auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req ReactRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Recipient == "" || req.MessageID == "" || req.Emoji == nil {
+			http.Error(w, "recipient, message_id, and emoji are required", http.StatusBadRequest)
+			return
+		}
+		chatJID, err := types.ParseJID(req.Recipient)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid recipient JID: %v", err), http.StatusBadRequest)
+			return
+		}
+		var senderJID types.JID
+		switch {
+		case req.FromMe:
+			if client.Store.ID == nil {
+				http.Error(w, "Not logged in", http.StatusServiceUnavailable)
+				return
+			}
+			senderJID = *client.Store.ID
+		case req.SenderJID != "":
+			if senderJID, err = types.ParseJID(req.SenderJID); err != nil {
+				http.Error(w, fmt.Sprintf("Invalid sender_jid: %v", err), http.StatusBadRequest)
+				return
+			}
+			if senderJID.User == "" || senderJID.Server == "" {
+				http.Error(w, "Invalid sender_jid", http.StatusBadRequest)
+				return
+			}
+		default:
+			if chatJID.Server == types.GroupServer {
+				http.Error(w, "sender_jid is required for group reactions when from_me is false", http.StatusBadRequest)
+				return
+			}
+			senderJID = chatJID
+		}
+		msg := client.BuildReaction(chatJID, senderJID, req.MessageID, *req.Emoji)
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := client.SendMessage(context.Background(), chatJID, msg); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	}))
 
 	// Handler for downloading media
@@ -2461,17 +2577,17 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 			var displayName, convName *string
 			// Try to extract the fields we care about regardless of the exact type
 			v := reflect.ValueOf(conversation)
-			if v.Kind() == reflect.Ptr && !v.IsNil() {
+			if v.Kind() == reflect.Pointer && !v.IsNil() {
 				v = v.Elem()
 
 				// Try to find DisplayName field
-				if displayNameField := v.FieldByName("DisplayName"); displayNameField.IsValid() && displayNameField.Kind() == reflect.Ptr && !displayNameField.IsNil() {
+				if displayNameField := v.FieldByName("DisplayName"); displayNameField.IsValid() && displayNameField.Kind() == reflect.Pointer && !displayNameField.IsNil() {
 					dn := displayNameField.Elem().String()
 					displayName = &dn
 				}
 
 				// Try to find Name field
-				if nameField := v.FieldByName("Name"); nameField.IsValid() && nameField.Kind() == reflect.Ptr && !nameField.IsNil() {
+				if nameField := v.FieldByName("Name"); nameField.IsValid() && nameField.Kind() == reflect.Pointer && !nameField.IsNil() {
 					n := nameField.Elem().String()
 					convName = &n
 				}
@@ -2732,6 +2848,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					fileSHA256,
 					fileEncSHA256,
 					fileLength,
+					"", // quoted_message_id: history sync does not carry ContextInfo
 				)
 				if err != nil {
 					logger.Warnf("Failed to store history message: %v", err)

@@ -125,7 +125,7 @@ A failing blocking job is a hard block — fix it or explain in the PR why it's 
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_ALLOWED_NUMBERS` | unset (full access) | Comma-separated phone numbers (full international form, no `+`/leading `0`) this MCP server instance may read from and send to. When set, all other DMs and **all** groups are hidden. Enforced in `whatsapp.py`; per-instance, so each project/LLM can scope one shared account. |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty = disabled) |
-| `FORWARD_SELF` | `false` | Whether self-sent messages are forwarded |
+| `FORWARD_SELF` | `true` | Whether self-sent messages are forwarded (`getEnvBool` default; set `FORWARD_SELF=false` to disable) |
 
 When adding a new env var: document it here, in `README.md`, and in `.env.example`.
 
