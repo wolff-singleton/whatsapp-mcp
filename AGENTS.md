@@ -136,10 +136,30 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 1. **JIDs.** WhatsApp identifies users as `1234567890@s.whatsapp.net` (DM), `123456@g.us` (group), and `<random>@lid` (link-ID, anonymous). The bridge maintains a phone↔LID map in `whatsapp.db.whatsmeow_lid_map`. Many "user is missing" / "messages don't show" bugs trace back to JID-form mismatches. Always think about both forms.
 2. **Media files** live under `store/{chat_jid}/` with timestamp + message-ID filenames. Don't hand-construct these paths in client code; use the bridge's `/api/download` endpoint.
 3. **Audio.** WhatsApp voice messages must be Opus `.ogg`. The MCP server's `send_audio_message` tool auto-converts via FFmpeg if installed.
-4. **History sync** is controlled by the *primary* device (the phone). The bridge can request more (see the `--full-history-pair` flag), but the phone has the final word.
+4. **History sync** is controlled by the *primary* device (the phone). The bridge can request more (see the `--full-history-pair` flag), but the phone has the final word. A fresh re-link triggers history sync, which back-fills inbound messages from any offline/logged-out window — so an outage's incoming messages are usually recovered, not lost.
 5. **`messages.db` is the source of truth for the MCP server.** Don't make the MCP server dependent on the bridge being up for *read* operations.
 6. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
 7. **Process name ≠ binary name.** `whatsapp-bridge/go.mod` declares `module whatsapp-client`, so `go run .` runs as **`whatsapp-client`** (not `whatsapp-bridge`). To find/kill the dev bridge use `pgrep -af whatsapp-client` or match by port (`ss -ltnp | grep :8080`). The Docker build (`Dockerfile`) outputs a `whatsapp-bridge` binary; the container is `whatsapp-mcp-bridge-1`.
+8. **`messages.db` timestamps are stored in UTC.** Convert to local before displaying or reasoning about "when" (ACST = `+9 hours +30 minutes`); don't assume local time when filtering by `timestamp`.
+9. **Ad-hoc `sqlite3` reads can hit `database is locked`** while the bridge is running — it holds a write lock, worst right after pairing. Use `sqlite3 -cmd ".timeout 5000" …` for CLI queries. The MCP server's own reads are unaffected.
+
+## Bridge recovery — QR re-link (server-side device removal)
+
+Symptoms: sends fail with `Not connected`; `whatsmeow_device` is empty; the canary is red; container logs show `Got device removed stream error` / `Device logged out`. This is a **server-side device removal and requires a fresh QR scan** — distinct from the 405 "client outdated" case, which only needs a whatsmeow bump + rebuild.
+
+1. **Rebuild + restart** (picks up any committed whatsmeow bump): `docker compose build bridge && docker compose up -d bridge`.
+2. **Grab the QR payload** from the logs — it rotates ~every 20s:
+   ```bash
+   docker logs whatsapp-mcp-bridge-1 2>&1 | grep -oP 'Emitting QR code \K[^\x1b]+' | tail -1
+   ```
+   The logged string (including the `https://wa.me/…` prefix) **is** the exact QR data.
+3. **Render a scannable PNG.** whatsmeow's half-block terminal QR does not survive a chat renderer. No `qrencode`/`python-qrcode` is installed, so use an ephemeral env: `uv run --no-project --with 'qrcode[pil]' python …`. Because the code rotates, keep the PNG refreshed (loop: re-read the latest log line, re-render on change, exit once `whatsmeow_device` > 0).
+4. **Show it:** `xdg-open <png>` (Nat's desktop is `DISPLAY=:0`).
+5. **Scan from the allow-listed phone only** — `WHATSAPP_ALLOWED_ACCOUNTS` (currently `61494559126`). Any other account is rejected in `PrePairCallback`.
+6. **Verify pairing:** `whatsmeow_device` = 1; logs show `Successfully paired …61494559126… / Successfully connected and authenticated`. A `stream:error 515` immediately after pairing is normal (whatsmeow reconnects and re-authenticates).
+7. **Confirm the send path now** — don't wait for the 30-min timer: `systemctl --user start whatsapp-canary.service`, then `journalctl --user -u whatsapp-canary.service -n 5` (`Finished` = green; `Failed with result 'exit-code'` = still broken).
+
+After a successful re-link, history sync back-fills inbound messages from the offline window (see Gotcha 4).
 
 ## Where to make changes
 
