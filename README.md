@@ -614,6 +614,31 @@ Uninstall preserves `whatsapp-bridge/store/`, including WhatsApp session DBs,
 message DBs, media, and `.bridge-token`. Logs are left in
 `~/Library/Logs/whatsapp-mcp/` for manual cleanup.
 
+### End-to-end canary (Linux/systemd)
+
+A logged-out session is invisible to `docker ps` and to `/api/health` in some
+states (the websocket can be open while unlinked, e.g. during QR cycles), so
+delivery can silently break. `scripts/whatsapp-canary.sh` closes that gap: it
+sends a timestamped message from the paired account to itself via
+`/api/send`, which only succeeds after WhatsApp's server acks — proving REST,
+token, session, and server round-trip in one probe.
+
+```bash
+scripts/whatsapp-canary.sh run           # one probe: send + alert/heartbeat logic
+scripts/whatsapp-canary.sh self-number   # show which account is paired
+
+# run every 30 min via a systemd user timer (needs `loginctl enable-linger`):
+cp scripts/systemd/whatsapp-canary.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now whatsapp-canary.timer
+```
+
+On failure it emails an alert (once on the ok→fail transition, re-alerting
+every `CANARY_REALERT_HOURS`, all-clear on recovery). On success it pings
+`CANARY_HEARTBEAT_URL` (e.g. a [healthchecks.io](https://healthchecks.io)
+check) so silence from the canary itself also raises an alert. Configuration
+is via `CANARY_*` env vars or `~/.config/whatsapp-canary/config.env`; state
+and logs live in `~/.local/state/whatsapp-canary/`.
+
 ### CLI flags (Go bridge)
 
 | Flag                  | Default | Description                                                                                                                                                                                                                                                       |

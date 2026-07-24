@@ -1,0 +1,6 @@
+[Unit]
+Description=WhatsApp bridge end-to-end canary (self-message probe)
+
+[Service]
+Type=oneshot
+ExecStart=%h/Documents/GitHub/whatsapp-mcp/scripts/whatsapp-canary.sh run
