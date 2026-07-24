@@ -46,6 +46,13 @@ var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
 
+// parseAllowedAccounts splits WHATSAPP_ALLOWED_ACCOUNTS into phone numbers
+// (country code, no +). Comma and/or whitespace separated; empty input means
+// no restriction.
+func parseAllowedAccounts(raw string) []string {
+	return strings.Fields(strings.ReplaceAll(raw, ",", " "))
+}
+
 // getEnvBool reads a boolean env var with a default.
 // Accepts: 1/true/yes/on and 0/false/no/off (case-insensitive)
 func getEnvBool(key string, def bool) bool {
@@ -2231,6 +2238,23 @@ func main() {
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
+	}
+
+	// Refuse to pair with any account not listed in WHATSAPP_ALLOWED_ACCOUNTS
+	// (set in docker-compose.yml). PrePairCallback fires before whatsmeow
+	// stores credentials, so a wrong-account QR scan is rejected with no
+	// session state left to clean up.
+	if allowedAccounts := parseAllowedAccounts(os.Getenv("WHATSAPP_ALLOWED_ACCOUNTS")); len(allowedAccounts) > 0 {
+		logger.Infof("Pairing restricted to account(s): %s", strings.Join(allowedAccounts, ", "))
+		client.PrePairCallback = func(jid types.JID, platform, businessName string) bool {
+			for _, num := range allowedAccounts {
+				if jid.User == num {
+					return true
+				}
+			}
+			logger.Errorf("REJECTED pairing from %s (%s): not in WHATSAPP_ALLOWED_ACCOUNTS", jid.User, platform)
+			return false
+		}
 	}
 
 	// Initialize message store

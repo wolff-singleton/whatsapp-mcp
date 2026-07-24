@@ -471,6 +471,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_BRIDGE_TOKEN` | generated in `whatsapp-bridge/store/.bridge-token` | Bearer token required for bridge REST calls |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_ALLOWED_NUMBERS` | unset (full access)                  | Comma-separated phone numbers this instance may read/send (see below) |
+| `WHATSAPP_ALLOWED_ACCOUNTS` | unset (any account)                 | Phone numbers the bridge may pair with — wrong-account QR scans are rejected (see below) |
 
 ### Restricting an instance to specific contacts
 
@@ -494,6 +495,19 @@ each project its own MCP server config with a different allowlist. It guards the
 LLM-facing tools against reading or messaging contacts outside the list; it is
 not a substitute for OS-level isolation against an untrusted operator (anyone
 who can read `messages.db` directly still sees everything).
+
+### Restricting which account may pair
+
+Set `WHATSAPP_ALLOWED_ACCOUNTS` (comma/space-separated numbers, full
+international form, no `+`) to lock the **bridge** to specific WhatsApp
+account(s). A QR scan from any other account is rejected in whatsmeow's
+`PrePairCallback` — before credentials are stored, so a wrong-phone scan
+leaves no session state to clean up. The bridge logs
+`REJECTED pairing from <number>` and keeps emitting QR codes.
+
+This is different from `WHATSAPP_ALLOWED_NUMBERS`, which scopes what an MCP
+server instance may read/send once paired. Unset (the default) preserves
+upstream behaviour: any account may pair.
 
 ### Bridge authentication and media paths
 

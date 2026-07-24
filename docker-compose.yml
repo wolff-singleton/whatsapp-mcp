@@ -3,6 +3,9 @@ services:
     build: ./whatsapp-bridge
     environment:
       WHATSAPP_BRIDGE_BIND: 0.0.0.0
+      # Only this account may pair with the bridge — a QR scan from any other
+      # number is rejected before credentials are stored (PrePairCallback).
+      WHATSAPP_ALLOWED_ACCOUNTS: "61494559126"
       # Outbound media root, mounted below at the identical host path so the
       # absolute path the MCP server sends resolves to the same bytes inside
       # the container. The MCP server defaults to this same path.

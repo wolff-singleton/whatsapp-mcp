@@ -2188,3 +2188,35 @@ func TestExtractQuotedMessageInfo_NoContextInfo(t *testing.T) {
 		})
 	}
 }
+
+// TestParseAllowedAccounts covers the WHATSAPP_ALLOWED_ACCOUNTS formats the
+// pairing allowlist accepts: empty (no restriction), single number, and
+// comma/space-separated lists with stray whitespace.
+func TestParseAllowedAccounts(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"empty means unrestricted", "", nil},
+		{"whitespace only", "  ", nil},
+		{"single number", "61494559126", []string{"61494559126"}},
+		{"comma separated", "61494559126,61400000000", []string{"61494559126", "61400000000"}},
+		{"comma and spaces", " 61494559126 , 61400000000 ", []string{"61494559126", "61400000000"}},
+		{"space separated", "61494559126 61400000000", []string{"61494559126", "61400000000"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseAllowedAccounts(tc.raw)
+			if len(got) != len(tc.want) {
+				t.Fatalf("parseAllowedAccounts(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("parseAllowedAccounts(%q)[%d] = %q, want %q", tc.raw, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
