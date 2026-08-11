@@ -1,5 +1,8 @@
+import os
 import signal
 import sys
+import threading
+import time
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -432,10 +435,42 @@ def shutdown_handler(signum, frame):
     sys.exit(0)
 
 
+def parent_has_changed(original_ppid: int, current_ppid: int) -> bool:
+    """True when this process has been re-parented, i.e. the MCP client that
+    spawned us is gone. Comparing against the original PPID (rather than
+    checking for PPID 1) also catches re-parenting to a subreaper such as
+    ``systemd --user``."""
+    return current_ppid != original_ppid
+
+
+def watch_parent(poll_seconds: float = 5.0) -> threading.Thread:
+    """Exit hard once the spawning MCP client disappears.
+
+    Orphaned stdio servers deadlock in FastMCP's shutdown path and never
+    receive a signal, so the signal handlers above can't save them. This
+    daemon thread notices the re-parenting and uses ``os._exit`` so the
+    process dies even when the main thread is wedged.
+    """
+    original_ppid = os.getppid()
+
+    def poll() -> None:
+        while True:
+            if parent_has_changed(original_ppid, os.getppid()):
+                os._exit(0)
+            time.sleep(poll_seconds)
+
+    thread = threading.Thread(target=poll, name="parent-watchdog", daemon=True)
+    thread.start()
+    return thread
+
+
 if __name__ == "__main__":
     # Register signal handlers for clean shutdown
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
+
+    # Exit if the MCP client that spawned us goes away (see watch_parent)
+    watch_parent()
 
     # Initialize and run the server
     mcp.run(transport="stdio")
