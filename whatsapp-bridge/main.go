@@ -837,6 +837,10 @@ func extractTextContent(msg *waProto.Message) string {
 type SendMessageResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+	// State is the bridge's session state at the time of the call — "ok",
+	// "disconnected", or "logged_out". Consumers use it to tell a transient
+	// send failure apart from "a human must re-scan the QR code".
+	State string `json:"state,omitempty"`
 }
 
 // SendMessageRequest represents the request body for the send message API
@@ -1066,10 +1070,40 @@ func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID,
 	return recipientJID, nil
 }
 
+// Session states reported by sessionState and surfaced on /api/health and
+// /api/send.
+const (
+	sessionOK           = "ok"
+	sessionDisconnected = "disconnected"
+	sessionLoggedOut    = "logged_out"
+)
+
+// sessionState reports whether the bridge can actually send a message.
+//
+// client.IsConnected() on its own is not a sufficient health signal: after a
+// server-side device removal the bridge reconnects the websocket and sits in
+// "QR limbo" — connected, but with no authenticated session — so a naive
+// health check reports OK while every send fails. Checking the device store
+// and IsLoggedIn as well makes that state visible to callers instead of
+// silently failing sends for days.
+func sessionState(client *whatsmeow.Client) (string, string) {
+	switch {
+	case client == nil:
+		return sessionLoggedOut, "WhatsApp client is not initialised"
+	case client.Store == nil || client.Store.ID == nil:
+		return sessionLoggedOut, "Not paired to a WhatsApp account - scan the QR code to re-link the bridge"
+	case !client.IsConnected():
+		return sessionDisconnected, "Not connected to WhatsApp"
+	case !client.IsLoggedIn():
+		return sessionLoggedOut, "Connected but not authenticated - the linked device was removed; scan the QR code to re-link the bridge"
+	}
+	return sessionOK, ""
+}
+
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string) (bool, string) {
-	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
+	if state, detail := sessionState(client); state != sessionOK {
+		return false, detail
 	}
 
 	var settingsLookupJID types.JID
@@ -1862,13 +1896,20 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 	// Health check endpoint
 	mux.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		state, detail := sessionState(client)
 		status := map[string]interface{}{
-			"status":    "ok",
+			"status":    state,
 			"connected": client.IsConnected(),
+			"logged_in": client.IsLoggedIn(),
+			"paired":    client.Store != nil && client.Store.ID != nil,
 			"timestamp": time.Now().Unix(),
 		}
-		if !client.IsConnected() {
-			status["status"] = "disconnected"
+		if detail != "" {
+			status["detail"] = detail
+		}
+		// Anything short of a logged-in session means sends will fail, so fail
+		// the health check rather than reporting OK on a bridge that cannot send.
+		if state != sessionOK {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		_ = json.NewEncoder(w).Encode(status)
@@ -1926,20 +1967,32 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			req.Recipient, len(req.Message), resolvedMediaPath != "")
 
 		// Send the message
+		state, _ := sessionState(client)
 		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent)
-		fmt.Printf("← /api/send success=%v status=%q\n", success, message)
+		fmt.Printf("← /api/send success=%v state=%q status=%q\n", success, state, message)
+		if !success && state != sessionOK {
+			// Loud, actionable log line: this failure will not clear on its own.
+			fmt.Printf("!! /api/send failed because the bridge has no usable WhatsApp session (state=%s). %s\n", state, message)
+		}
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 
-		// Set appropriate status code
+		// Set appropriate status code. A dead session is 503 (the bridge itself
+		// is unavailable and needs a re-link) rather than 500, so callers can
+		// distinguish it from a per-message failure and alert on it.
 		if !success {
-			w.WriteHeader(http.StatusInternalServerError)
+			if state != sessionOK {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			} else {
+				w.WriteHeader(http.StatusInternalServerError)
+			}
 		}
 
 		// Send response
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: success,
 			Message: message,
+			State:   state,
 		})
 	}))
 
@@ -2342,7 +2395,10 @@ func main() {
 			logger.Infof("✓ Successfully connected to WhatsApp servers")
 
 		case *events.LoggedOut:
-			logger.Warnf("⚠️  Device logged out, please scan QR code to log in again")
+			// This is unrecoverable without a human: every send will fail until
+			// someone re-scans a QR code. Log it at error level so it stands out
+			// in container logs and so log-based alerting can key off it.
+			logger.Errorf("❌ DEVICE LOGGED OUT (reason=%v) - the linked device was removed. ALL SENDS WILL FAIL until the bridge is re-linked by scanning a QR code.", v.Reason)
 
 		case *events.Disconnected:
 			logger.Warnf("⚠️  Disconnected from WhatsApp servers, will attempt reconnection...")
